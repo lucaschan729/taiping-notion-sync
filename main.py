@@ -619,7 +619,7 @@ def build_excel(year, cols, sections, rows, reasons, now):
     notes = ("分紅實現率＝實際派發的累積非保證利益 ÷ 銷售時所示的金額。"
              "100% 即與銷售時一致，高於 100% 即比銷售時多。年度欄下方的年份為保單生效年份。\n"
              "綠色＝100% 或以上；紅色＝低於 80%；「/」＝官方網站顯示「不適用」（原因見「概覽」）。\n"
-             "資料來源：中國太平人壽保險（香港）網站（報告年度 %s）｜更新日期：%s" % (year, today))
+             "資料來源：中國太平人壽保險（香港）網站（報告年度 " + str(year) + "）｜更新日期：" + today)
     title = "%s分紅實現率" % year
     wb = Workbook()
     wb.remove(wb.active)
