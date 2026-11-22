@@ -10,5 +10,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -q curl_cffi
-      - run: python main.py
+      - run: pip install -q playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
+      - run: xvfb-run -a python main.py
