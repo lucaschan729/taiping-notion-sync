@@ -1,16 +1,27 @@
 name: update
 on:
+  schedule:
+    - cron: "0 2 * 4-5 1"
   workflow_dispatch:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -q playwright
+      - run: pip install -q playwright openpyxl requests
       - run: python -m playwright install --with-deps chromium
       - run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
-      - run: xvfb-run -a python main.py
+      - name: Run python main.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_URL: ${{ secrets.NOTION_DATABASE_URL }}
+        run: xvfb-run -a python main.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: taiping-excel
+          path: output/*.xlsx
