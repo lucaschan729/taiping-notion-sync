@@ -1,103 +1,165 @@
-import html as htmllib
 import re
-from urllib.parse import urljoin
 
-from curl_cffi import requests as creq
+from playwright.sync_api import sync_playwright
 
 START = "https://www.tplhk.cntaiping.com/info/fulfillment_ratio"
 KEYWORDS = ["報告年度", "分紅實現率", "總現金價值", "現金價值比率", "過往派息率",
             "萬用壽險", "週年紅利", "終期紅利", "復歸紅利", "特別紅利", "不適用", "N/A"]
 LINK_PAT = re.compile(r"實現率|現金價值|派息|紅利|fulfil|ratio|dividend|\.pdf|\.xlsx?", re.I)
-API_PAT = re.compile(r"[\"'](/?[A-Za-z0-9_\-/\.]*(?:api|ajax|json|query|list|get)[A-Za-z0-9_\-/\.\?=&]*)[\"']", re.I)
 
-s = creq.Session(impersonate="chrome")
+JS_TABLES = """() => Array.from(document.querySelectorAll('table')).map(
+  t => Array.from(t.rows).map(
+    r => Array.from(r.cells).map(c => c.innerText.trim().replace(/\\s+/g, ' '))))"""
+JS_SELECTS = """() => Array.from(document.querySelectorAll('select')).map(
+  s => ({id: s.id, name: s.name, opts: Array.from(s.options).map(o => o.text.trim())}))"""
+JS_LINKS = """() => Array.from(document.querySelectorAll('a')).map(
+  a => [a.innerText.trim().replace(/\\s+/g, ' ').slice(0, 40), a.href])"""
+JS_TEXT = "() => document.body ? document.body.innerText : ''"
 
 
-def flat(t):
-    t = re.sub(r"<(script|style)\b.*?</\1>", " ", t or "", flags=re.S | re.I)
-    t = re.sub(r"<[^>]+>", " ", t)
-    return re.sub(r"\s+", " ", htmllib.unescape(t)).strip()
+def one_line(t):
+    return re.sub(r"\s+", " ", t or "").strip()
 
 
-def attr(tag, name):
-    m = re.search(r"\b" + name + r"\s*=\s*[\"']([^\"']*)[\"']", tag, flags=re.I)
-    return m.group(1) if m else ""
+def probe(p, label, **launch):
+    print("\n########## 嘗試：%s ##########" % label)
+    try:
+        browser = p.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+            **launch)
+    except Exception as e:
+        print("   無法啟動瀏覽器：%s" % one_line(str(e))[:300])
+        return False
+
+    ctx = browser.new_context(locale="zh-HK", timezone_id="Asia/Hong_Kong",
+                              viewport={"width": 1366, "height": 900})
+    page = ctx.new_page()
+    responses = []
+
+    def on_response(resp):
+        try:
+            if resp.request.resource_type in ("document", "xhr", "fetch"):
+                responses.append(resp)
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+
+    print("=== 1. 載入 ===")
+    try:
+        r = page.goto(START, wait_until="domcontentloaded", timeout=60000)
+        print("   首次回應狀態：%s" % (r.status if r else "沒有"))
+    except Exception as e:
+        print("   載入出錯：%s" % one_line(str(e))[:300])
+
+    ok = False
+    for i in range(25):
+        page.wait_for_timeout(2000)
+        try:
+            html = page.content()
+        except Exception:
+            continue
+        if "實現率" in html:
+            ok = True
+            print("   約 %d 秒後出現「實現率」字樣" % ((i + 1) * 2))
+            break
+    if not ok:
+        print("   等了 50 秒仍未出現「實現率」字樣")
+    page.wait_for_timeout(6000)
+
+    try:
+        print("   最終網址：%s" % page.url)
+        print("   標題：%s" % page.title())
+    except Exception as e:
+        print("   讀取標題出錯：%s" % one_line(str(e))[:200])
+
+    print("\n=== 2. 網絡請求（頁面及資料介面）：%d 個 ===" % len(responses))
+    for resp in responses[:80]:
+        try:
+            rt = resp.request.resource_type
+            ctype = resp.headers.get("content-type", "")
+            print("   [%s] %s %s｜%s｜%s" % (rt, resp.request.method, resp.status, ctype[:40], resp.url[:200]))
+            if rt in ("xhr", "fetch"):
+                post = resp.request.post_data
+                if post:
+                    print("        送出：%s" % one_line(post)[:300])
+                try:
+                    body = resp.text()
+                    print("        回傳 %d 字：%s" % (len(body), one_line(body)[:400]))
+                except Exception as e:
+                    print("        讀不到內容：%s" % one_line(str(e))[:120])
+        except Exception:
+            pass
+
+    print("\n=== 3. 關鍵字 ===")
+    try:
+        text = page.evaluate(JS_TEXT)
+    except Exception:
+        text = ""
+    flat_text = one_line(text)
+    print("   頁面文字總長 %d 字" % len(flat_text))
+    for kw in KEYWORDS:
+        n = flat_text.count(kw)
+        i = flat_text.find(kw)
+        ctx_txt = flat_text[max(0, i - 50):i + 120] if i >= 0 else ""
+        print("   %s：%d 次｜%s" % (kw, n, ctx_txt))
+
+    frames = page.frames
+    print("\n=== 4. 框架：%d 個 ===" % len(frames))
+    for k, f in enumerate(frames, 1):
+        print("\n--- 框架 %d：%s ---" % (k, f.url[:200]))
+        try:
+            tables = f.evaluate(JS_TABLES)
+        except Exception as e:
+            print("   讀取出錯：%s" % one_line(str(e))[:200])
+            continue
+        print("   表格 %d 個" % len(tables))
+        for n, t in enumerate(tables[:8], 1):
+            width = max([len(row) for row in t] or [0])
+            print("   表格 %d｜%d 行｜最多 %d 欄" % (n, len(t), width))
+            for row in t[:7]:
+                print("      %s" % "｜".join(row)[:260])
+        try:
+            selects = f.evaluate(JS_SELECTS)
+        except Exception:
+            selects = []
+        print("   下拉選單 %d 個" % len(selects))
+        for s in selects[:8]:
+            print("      id=%s name=%s｜選項 %d 個｜%s" % (
+                s.get("id"), s.get("name"), len(s.get("opts", [])), "、".join(s.get("opts", [])[:20])[:400]))
+        try:
+            links = f.evaluate(JS_LINKS)
+        except Exception:
+            links = []
+        seen = []
+        for label_txt, href in links:
+            if href and (LINK_PAT.search(href) or LINK_PAT.search(label_txt)):
+                item = "%s｜%s" % (label_txt, href)
+                if item not in seen:
+                    seen.append(item)
+        print("   相關連結 %d 條" % len(seen))
+        for item in seen[:60]:
+            print("      %s" % item[:260])
+
+    print("\n=== 5. 頁面文字（節錄）===")
+    i = flat_text.find("報告年度")
+    if i < 0:
+        i = flat_text.find("實現率")
+    start = max(0, i - 200) if i >= 0 else 0
+    print("   %s" % flat_text[start:start + 3500])
+
+    browser.close()
+    return ok
 
 
 def main():
-    r = s.get(START, timeout=90, headers={"Accept-Language": "zh-HK,zh;q=0.9"})
-    raw = r.content.decode("utf-8", "replace")
-    print("=== 1. 網頁 ===")
-    print("   狀態 %s｜%d KB｜最終網址 %s" % (r.status_code, len(raw) // 1024, r.url))
-    m = re.search(r"<title[^>]*>(.*?)</title>", raw, flags=re.S | re.I)
-    print("   標題：%s" % (flat(m.group(1)) if m else "沒有"))
-
-    print("\n=== 2. 關鍵字 ===")
-    for kw in KEYWORDS:
-        hits = [x.start() for x in re.finditer(re.escape(kw), raw)]
-        ctx = flat(raw[max(0, hits[0] - 60):hits[0] + 120])[:150] if hits else ""
-        print("   %s：%d 次｜%s" % (kw, len(hits), ctx))
-
-    tables = re.findall(r"<table\b.*?</table>", raw, flags=re.S | re.I)
-    print("\n=== 3. 表格：%d 個 ===" % len(tables))
-    for k, t in enumerate(tables[:4], 1):
-        trs = re.findall(r"<tr\b.*?</tr>", t, flags=re.S | re.I)
-        print("   表格 %d｜%d 行" % (k, len(trs)))
-        for tr in trs[:5]:
-            cells = [flat(c) for c in re.findall(r"<t[hd]\b[^>]*>(.*?)</t[hd]>", tr, flags=re.S | re.I)]
-            print("      %s" % "｜".join(cells)[:220])
-
-    selects = re.findall(r"(<select\b[^>]*>)(.*?)</select>", raw, flags=re.S | re.I)
-    print("\n=== 4. 下拉選單：%d 個 ===" % len(selects))
-    for tag, body in selects[:6]:
-        opts = [flat(o) for o in re.findall(r"<option\b[^>]*>(.*?)</option>", body, flags=re.S | re.I)]
-        print("   id=%s name=%s｜選項 %d 個｜%s" % (attr(tag, "id"), attr(tag, "name"), len(opts), "、".join(opts[:15])[:300]))
-
-    print("\n=== 5. iframe ===")
-    for tag in re.findall(r"<iframe\b[^>]*>", raw, flags=re.I)[:10]:
-        print("   %s" % urljoin(r.url, attr(tag, "src")))
-
-    print("\n=== 6. 相關連結 ===")
-    seen = []
-    for tag, body in re.findall(r"(<a\b[^>]*>)(.*?)</a>", raw, flags=re.S | re.I):
-        href = attr(tag, "href")
-        label = flat(body)[:40]
-        if href and (LINK_PAT.search(href) or LINK_PAT.search(label)):
-            item = "%s｜%s" % (label, urljoin(r.url, href))
-            if item not in seen:
-                seen.append(item)
-    print("   共 %d 條" % len(seen))
-    for item in seen[:60]:
-        print("   %s" % item)
-
-    print("\n=== 7. Script ===")
-    srcs = [attr(t, "src") for t in re.findall(r"<script\b[^>]*>", raw, flags=re.I)]
-    srcs = [x for x in srcs if x]
-    print("   外部 script %d 個" % len(srcs))
-    for x in srcs[:30]:
-        print("   %s" % urljoin(r.url, x))
-    inline = [b for b in re.findall(r"<script\b[^>]*>(.*?)</script>", raw, flags=re.S | re.I) if b.strip()]
-    print("   內嵌 script %d 個｜大小（字元）：%s" % (len(inline), [len(b) for b in inline][:30]))
-    apis = []
-    for b in inline:
-        for x in API_PAT.findall(b):
-            if x not in apis and len(x) > 4:
-                apis.append(x)
-    print("   疑似資料介面 %d 個" % len(apis))
-    for x in apis[:40]:
-        print("   %s" % x)
-    for k, b in enumerate(inline, 1):
-        if "%" in b and re.search(r"\d{2,3}%", b):
-            print("   內嵌 script %d 含百分比數值，節錄：%s" % (k, re.sub(r"\s+", " ", b)[:600]))
-
-    print("\n=== 8. 頁面文字（節錄）===")
-    body = re.search(r"<body\b.*</body>", raw, flags=re.S | re.I)
-    txt = flat(body.group(0) if body else raw)
-    print("   文字總長 %d 字" % len(txt))
-    i = txt.find("分紅實現率")
-    print("   %s" % txt[max(0, i):max(0, i) + 2500])
-
-    print("\n=== 完 ===")
+    with sync_playwright() as p:
+        ok = probe(p, "Playwright 內置 Chromium")
+        if not ok:
+            ok = probe(p, "系統 Google Chrome", channel="chrome")
+    print("\n=== 結論：%s ===" % ("成功讀到頁面內容" if ok else "兩種瀏覽器都未能通過驗證"))
+    print("=== 完 ===")
 
 
 if __name__ == "__main__":
